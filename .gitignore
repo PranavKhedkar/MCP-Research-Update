@@ -52,12 +52,16 @@ env/
 *~
 *.swp
 
-# dotenv
+# dotenv / secrets
 .env
 .venv
+credentials.json
 
 # mypy
 .mypy_cache/
 
 # Byte-compiled
 *.pyc
+
+# json key
+service_account_credentials.json
