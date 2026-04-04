@@ -5,6 +5,10 @@ Connects to the local MCP server (server.py), orchestrates the four tools,
 and uses Claude to generate a concise bullet-point report that is then
 emailed to the professor.
 
+Workflow:
+    Step 1 – Run export_and_commit.py to commit the updated Excel file.
+    Step 2 – Run this script to generate and send the report.
+
 Usage:
     python client.py \
         --repo-path   "d:/MCP_Auto_update" \

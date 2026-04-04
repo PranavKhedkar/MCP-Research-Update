@@ -1,3 +1,4 @@
+import io
 import os
 import json
 import smtplib
@@ -6,6 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 import git
+import pandas as pd
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -22,50 +24,84 @@ mcp = FastMCP("weekly-report-server")
 @mcp.tool()
 def get_git_diff(repo_path: str, file_name: str) -> str:
     """
-    Returns a human-readable summary of the diff between the last two commits
-    for a specific file in a local Git repository.
+    Compares the Excel file at HEAD vs HEAD~1 by extracting both versions
+    directly from git as bytes, loading them into pandas DataFrames, and
+    returning a human-readable row-level diff. No CSV file is needed.
 
     Args:
         repo_path: Absolute path to the root of the Git repository.
-        file_name: Name (or relative path) of the file to diff.
+        file_name: Name (or relative path) of the Excel file to diff.
 
     Returns:
-        A string containing the raw unified diff, or an error message.
+        A structured text summary of added, removed, and changed rows.
     """
     try:
         repo = git.Repo(repo_path)
-        commits = list(repo.iter_commits(paths=file_name, max_count=2))
 
-        if len(commits) < 2:
-            if len(commits) == 1:
-                return (
-                    f"Only one commit found for '{file_name}'. "
-                    "No previous version to compare against.\n"
-                    f"Latest commit: {commits[0].hexsha[:8]} – {commits[0].message.strip()}"
-                )
-            return f"No commits found for file '{file_name}' in repo '{repo_path}'."
-
-        newer, older = commits[0], commits[1]
-        diffs = older.diff(newer, paths=file_name, create_patch=True)
-
-        if not diffs:
+        all_commits = list(repo.iter_commits(max_count=2))
+        if len(all_commits) < 2:
             return (
-                f"No changes detected in '{file_name}' between "
-                f"{older.hexsha[:8]} and {newer.hexsha[:8]}."
+                f"Not enough commits to compare. "
+                f"At least two commits are required (found {len(all_commits)})."
             )
+
+        head = repo.commit("HEAD")
+        prev = repo.commit("HEAD~1")
+
+        head_bytes = head.tree[file_name].data_stream.read()
+        prev_bytes = prev.tree[file_name].data_stream.read()
+
+        df_new = pd.read_excel(io.BytesIO(head_bytes))
+        df_old = pd.read_excel(io.BytesIO(prev_bytes))
 
         lines = [
             f"File: {file_name}",
-            f"Comparing: {older.hexsha[:8]} ({older.message.strip()[:60]})",
-            f"       vs: {newer.hexsha[:8]} ({newer.message.strip()[:60]})",
+            f"Comparing: {prev.hexsha[:8]} ({prev.message.strip()[:60]})",
+            f"       vs: {head.hexsha[:8]} ({head.message.strip()[:60]})",
             "-" * 60,
+            f"Rows – previous: {len(df_old):,}  |  current: {len(df_new):,}  |  "
+            f"change: {len(df_new) - len(df_old):+,}",
+            f"Columns – previous: {len(df_old.columns)}  |  current: {len(df_new.columns)}",
         ]
-        for diff in diffs:
-            patch = diff.diff.decode("utf-8", errors="replace")
-            lines.append(patch)
+
+        # Column changes
+        added_cols = set(df_new.columns) - set(df_old.columns)
+        removed_cols = set(df_old.columns) - set(df_new.columns)
+        if added_cols:
+            lines.append(f"Columns added  : {sorted(added_cols)}")
+        if removed_cols:
+            lines.append(f"Columns removed: {sorted(removed_cols)}")
+
+        # Row-level diff using sets of tuples (order-independent)
+        old_rows = set(df_old.astype(str).itertuples(index=False, name=None))
+        new_rows = set(df_new.astype(str).itertuples(index=False, name=None))
+
+        added_rows = new_rows - old_rows
+        removed_rows = old_rows - new_rows
+
+        lines.append("")
+        lines.append(f"Rows added  : {len(added_rows):,}")
+        if added_rows:
+            sample = list(added_rows)[:5]
+            cols = list(df_new.columns)
+            for row in sample:
+                lines.append(f"  + {dict(zip(cols, row))}")
+            if len(added_rows) > 5:
+                lines.append(f"  … and {len(added_rows) - 5:,} more")
+
+        lines.append(f"Rows removed: {len(removed_rows):,}")
+        if removed_rows:
+            sample = list(removed_rows)[:5]
+            cols = list(df_old.columns)
+            for row in sample:
+                lines.append(f"  - {dict(zip(cols, row))}")
+            if len(removed_rows) > 5:
+                lines.append(f"  … and {len(removed_rows) - 5:,} more")
 
         return "\n".join(lines)
 
+    except KeyError:
+        return f"Error: '{file_name}' not found in the git tree at HEAD or HEAD~1."
     except git.InvalidGitRepositoryError:
         return f"Error: '{repo_path}' is not a valid Git repository."
     except Exception as exc:

@@ -4,3 +4,5 @@ gitpython
 google-api-python-client
 google-auth
 python-dotenv
+pandas
+openpyxl
